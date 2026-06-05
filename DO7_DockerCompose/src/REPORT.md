@@ -4,6 +4,7 @@
   * [Локальный запуск сервисов](#локальный-запуск-сервисов)
   * [Использование докер для запуска сервисов](#использование-докер-для-запуска-сервисов)
   * [Оптимизация образов и сборка с помощью docker compose](#оптимизация-образов-и-сборка-с-помощью-docker-compose)
+* [Part 2.](#part-2)
 <!-- TOC -->
 
 # Part 1.
@@ -583,3 +584,94 @@ networks:
 >
 
 - Остановил все контейнеры командой `docker compose down -v`
+
+---
+
+# Part 2.
+
+- Скачал и установил **Vagrant** с официального [сайта](https://developer.hashicorp.com/vagrant/install)
+
+- Добавил путь до `Vagrant\bin` в переменную окружения windows
+
+- Добавил две переменные окружения в файл `.zshrc`, для работы Vagrant из-под **wsl**:
+
+```zsh
+export VAGRANT_WSL_ENABLE_WINDOWS_ACCESS="1" # разрешаем Vagrant, выходить за рамки Linux и запускать исполняемые файлы Windows
+export VAGRANT_HOME="$HOME/.vagrant.d" # указываем Vagrant, в какую директорию скачивать образы (Boxes), плагины и хранить глобальные настройки
+
+# так же добавил alias для удобства использования команд
+alias vagrant="vagrant.exe
+```
+
+>  Версия установленного **Vagrant**:
+>
+> ![screen_2_01.png](screen/screen_2_01.png)
+>
+
+- Создал директорию `Vagrant` в корне проекта
+
+- В этой директории создал **Vagrantfile** с помощью команды `vagrant init`, и модифицировал его для развертывания одной виртуальной машины:
+
+
+```ruby
+# -*- mode: ruby -*-
+# vi: set ft=ruby :
+
+Vagrant.configure("2") do |config| # используем вторую версию API Vagrant
+  config.vm.box = "ubuntu/focal64" # указываем образ (Box) официальной 64-битной ubuntu 20.04 LTS
+
+  config.vm.provider "virtualbox" do |vb| # открываем блок настроек для провайдера виртуализации oracle virtualBox
+    vb.name = "VagrantVM" # задаем имя виртуальной машины, которое будет отображаться графическом интерфейсе virtualBox
+    vb.gui = false # отключаем графическое окно virtualBox при запуске, машина будет работать в headless mode
+    vb.memory = 2048 # выделяет ВМ 2048MB RAM от хоста
+    vb.cpus = 1 # выделяем одно процессорное ядро
+  end
+
+  config.vm.hostname = "VagrantVM" # задаем hostname внутри ВМ
+
+  # однократно копирует файл docker-compose.yml с хоста во внутреннюю директорию ВМ
+  config.vm.provision "file", source: "../src/docker-compose.yml", destination: "/home/vagrant/app/docker-compose.yml"
+  # рекурсивно копирует всю локальную директорию services со всем её содержимым внутрь ВМ
+  config.vm.provision "file", source: "../src/services", destination: "/home/vagrant/app/services"
+
+end
+```
+- Запустил описанную в **Vagrantfile** ВМ командой `vagrant up`
+
+>  Процесс скачивания образа, запуск, настройка ВМ и копирование исходного кода:
+>
+> ![screen_2_02.png](screen/screen_2_02.png)
+>
+
+>  Отображение запущенной машины в графическом интерфейсе virtualBox:
+>
+> ![screen_2_03.png](screen/screen_2_03.png)
+>
+
+>  Отображение запущенной машины, с помощью команды `vagrant status`:
+>
+> ![screen_2_04.png](screen/screen_2_04.png)
+>
+
+- Зашел внутрь ВМ с помощью команды `vagrant ssh` и проверил наличие исходного кода сервисов внтури машины:
+
+>  Успешное копирование файлов:
+>
+> ![screen_2_05.png](screen/screen_2_05.png)
+>
+
+- Вышел из ВМ, остановил и уничтожил машину с помощью команды `vagrant destroy`
+
+>  Уничтожение машины:
+>
+> ![screen_2_06.png](screen/screen_2_06.png)
+>
+
+- Проверил наличие скачанных образов командой `vagrant box list`
+
+>  Сохраненный официальный образ (Box) 64-битной ubuntu 20.04, который находиться в директории `$HOME/.vagrant.d`:
+>
+> ![screen_2_07.png](screen/screen_2_07.png)
+>
+
+---
