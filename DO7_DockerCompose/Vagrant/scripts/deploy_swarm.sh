@@ -10,13 +10,16 @@ if [ -d "$APP_DIR" ]; then
 
     echo "Launching docker stack deployment..."
     docker stack deploy -c docker-compose.yml $STACK_NAME
+    docker stack deploy -c portainer-agent-stack.yml portainer
 
     echo "Waiting for initialization of services..."
     sleep 25
     docker stack ls
     docker stack ps $STACK_NAME
     docker stack services $STACK_NAME
-
+    sleep 25
+    docker stack ps portainer
+    docker stack services portainer
 else
     echo "ERROR: The application directory $APP_DIR was not found. Deployment cancelled!"
     exit 1
