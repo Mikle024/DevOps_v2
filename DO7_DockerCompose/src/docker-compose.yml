@@ -1,6 +1,22 @@
 services:
+  nginx:
+    image: nginx:1.25
+    ports:
+      - target: 80
+        published: 80
+        protocol: tcp
+        mode: host
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/wait-for-it.sh:/usr/local/bin/wait-for-it.sh:ro
+    entrypoint: ["/usr/local/bin/wait-for-it.sh", "-s", "--timeout=90", "gateway-service:8087", "--", "nginx", "-g", "daemon off;"]
+    networks:
+      - backend
+    deploy:
+      placement:
+        constraints:
+          - node.role == manager
   postgres:
-    container_name: postgres_db
     image: postgres:13
     environment:
       POSTGRES_USER: postgres
@@ -12,9 +28,12 @@ services:
       - ./services/database/init.sql:/docker-entrypoint-initdb.d/init.sql
     networks:
       - backend
+    deploy:
+      placement:
+        constraints:
+          - node.role == manager
 
   rabbitmq:
-    container_name: rabbitmq_service
     image: rabbitmq:3-management-alpine
     ports:
       - "5672:5672"
@@ -26,73 +45,58 @@ services:
       - backend
 
   session-service:
-    container_name: session-service
-    build: ./services/session-service
-    ports:
-      - "8081:8081"
+    image: mikle024/do7-src-session-service:v1.0
     environment:
-      POSTGRES_HOST: postgres_db
+      POSTGRES_HOST: postgres
       POSTGRES_PORT: 5432
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: password
       POSTGRES_DB: users_db
     networks:
       - backend
-    depends_on:
-      - postgres
 
   hotel-service:
-    container_name: hotel-service
-    build: ./services/hotel-service
+    image: mikle024/do7-src-hotel-service:v1.0
     environment:
-      POSTGRES_HOST: postgres_db
+      POSTGRES_HOST: postgres
       POSTGRES_PORT: 5432
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: password
       POSTGRES_DB: hotels_db
     networks:
       - backend
-    depends_on:
-      - postgres
 
   payment-service:
-    container_name: payment-service
-    build: ./services/payment-service
+    image: mikle024/do7-src-payment-service:v1.0
     environment:
-      POSTGRES_HOST: postgres_db
+      POSTGRES_HOST: postgres
       POSTGRES_PORT: 5432
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: password
       POSTGRES_DB: payments_db
     networks:
       - backend
-    depends_on:
-      - postgres
 
   loyalty-service:
-    container_name: loyalty-service
-    build: ./services/loyalty-service
+    image: mikle024/do7-src-loyalty-service:v1.0
     environment:
-      POSTGRES_HOST: postgres_db
+      POSTGRES_HOST: postgres
       POSTGRES_PORT: 5432
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: password
       POSTGRES_DB: balances_db
     networks:
       - backend
-    depends_on:
-      - postgres
 
   report-service:
-    container_name: report-service
-    build: ./services/report-service
+    image: mikle024/do7-src-report-service:v1.0
     environment:
-      POSTGRES_HOST: postgres_db
+      POSTGRES_HOST: postgres
       POSTGRES_PORT: 5432
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: password
       POSTGRES_DB: statistics_db
-      RABBIT_MQ_HOST: rabbitmq_service
+      RABBIT_MQ_HOST: rabbitmq
       RABBIT_MQ_PORT: 5672
       RABBIT_MQ_USER: guest
       RABBIT_MQ_PASSWORD: guest
@@ -100,20 +104,16 @@ services:
       RABBIT_MQ_EXCHANGE: messagequeue-exchange
     networks:
       - backend
-    depends_on:
-      - postgres
-      - rabbitmq
 
   booking-service:
-    container_name: booking-service
-    build: ./services/booking-service
+    image: mikle024/do7-src-booking-service:v1.0
     environment:
-      POSTGRES_HOST: postgres_db
+      POSTGRES_HOST: postgres
       POSTGRES_PORT: 5432
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: password
       POSTGRES_DB: reservations_db
-      RABBIT_MQ_HOST: rabbitmq_service
+      RABBIT_MQ_HOST: rabbitmq
       RABBIT_MQ_PORT: 5672
       RABBIT_MQ_USER: guest
       RABBIT_MQ_PASSWORD: guest
@@ -127,18 +127,9 @@ services:
       LOYALTY_SERVICE_PORT: 8085
     networks:
       - backend
-    depends_on:
-      - postgres
-      - rabbitmq
-      - hotel-service
-      - payment-service
-      - loyalty-service
 
   gateway-service:
-    container_name: gateway-service
-    build: ./services/gateway-service
-    ports:
-      - "8087:8087"
+    image: mikle024/do7-src-gateway-service:v1.0
     environment:
       SESSION_SERVICE_HOST: session-service
       SESSION_SERVICE_PORT: 8081
@@ -154,16 +145,10 @@ services:
       REPORT_SERVICE_PORT: 8086
     networks:
       - backend
-    depends_on:
-      - session-service
-      - hotel-service
-      - booking-service
-      - payment-service
-      - loyalty-service
-      - report-service
 
 volumes:
   postgres_data:
 
 networks:
   backend:
+    driver: overlay

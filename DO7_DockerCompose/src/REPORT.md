@@ -4,6 +4,11 @@
   * [Локальный запуск сервисов](#локальный-запуск-сервисов)
   * [Использование докер для запуска сервисов](#использование-докер-для-запуска-сервисов)
   * [Оптимизация образов и сборка с помощью docker compose](#оптимизация-образов-и-сборка-с-помощью-docker-compose)
+* [Part 2.](#part-2)
+* [Part 3.](#part-3)
+  * [Ручной запуск Docker Swarm](#ручной-запуск-docker-swarm)
+  * [Автоматизация развертывания Docker Swarm + подключение nginx](#автоматизация-развертывания-docker-swarm--подключение-nginx)
+  * [Установка отдельного стека Portainer](#установка-отдельного-стека-portainer)
 <!-- TOC -->
 
 # Part 1.
@@ -583,3 +588,544 @@ networks:
 >
 
 - Остановил все контейнеры командой `docker compose down -v`
+
+---
+
+# Part 2.
+
+- Скачал и установил **Vagrant** с официального [сайта](https://developer.hashicorp.com/vagrant/install)
+
+- Добавил путь до `Vagrant\bin` в переменную окружения windows
+
+- Добавил две переменные окружения в файл `.zshrc`, для работы Vagrant из-под **wsl**:
+
+```zsh
+export VAGRANT_WSL_ENABLE_WINDOWS_ACCESS="1" # разрешаем Vagrant, выходить за рамки Linux и запускать исполняемые файлы Windows
+export VAGRANT_HOME="$HOME/.vagrant.d" # указываем Vagrant, в какую директорию скачивать образы (Boxes), плагины и хранить глобальные настройки
+
+# так же добавил alias для удобства использования команд
+alias vagrant="vagrant.exe
+```
+
+>  Версия установленного **Vagrant**:
+>
+> ![screen_2_01.png](screen/screen_2_01.png)
+>
+
+- Создал директорию `Vagrant` в корне проекта
+
+- В этой директории создал **Vagrantfile** с помощью команды `vagrant init`, и модифицировал его для развертывания одной виртуальной машины:
+
+
+```ruby
+# -*- mode: ruby -*-
+# vi: set ft=ruby :
+
+Vagrant.configure("2") do |config| # используем вторую версию API Vagrant
+  config.vm.box = "ubuntu/focal64" # указываем образ (Box) официальной 64-битной ubuntu 20.04 LTS
+
+  config.vm.provider "virtualbox" do |vb| # открываем блок настроек для провайдера виртуализации oracle virtualBox
+    vb.name = "VagrantVM" # задаем имя виртуальной машины, которое будет отображаться графическом интерфейсе virtualBox
+    vb.gui = false # отключаем графическое окно virtualBox при запуске, машина будет работать в headless mode
+    vb.memory = 2048 # выделяет ВМ 2048MB RAM от хоста
+    vb.cpus = 1 # выделяем одно процессорное ядро
+  end
+
+  config.vm.hostname = "VagrantVM" # задаем hostname внутри ВМ
+
+  # однократно копирует файл docker-compose.yml с хоста во внутреннюю директорию ВМ
+  config.vm.provision "file", source: "../src/docker-compose.yml", destination: "/home/vagrant/app/docker-compose.yml"
+  # рекурсивно копирует всю локальную директорию services со всем её содержимым внутрь ВМ
+  config.vm.provision "file", source: "../src/services", destination: "/home/vagrant/app/services"
+
+end
+```
+- Запустил описанную в **Vagrantfile** ВМ командой `vagrant up`
+
+>  Процесс скачивания образа, запуск, настройка ВМ и копирование исходного кода:
+>
+> ![screen_2_02.png](screen/screen_2_02.png)
+>
+
+>  Отображение запущенной машины в графическом интерфейсе virtualBox:
+>
+> ![screen_2_03.png](screen/screen_2_03.png)
+>
+
+>  Отображение запущенной машины, с помощью команды `vagrant status`:
+>
+> ![screen_2_04.png](screen/screen_2_04.png)
+>
+
+- Зашел внутрь ВМ с помощью команды `vagrant ssh` и проверил наличие исходного кода сервисов внтури машины:
+
+>  Успешное копирование файлов:
+>
+> ![screen_2_05.png](screen/screen_2_05.png)
+>
+
+- Вышел из ВМ, остановил и уничтожил машину с помощью команды `vagrant destroy`
+
+>  Уничтожение машины:
+>
+> ![screen_2_06.png](screen/screen_2_06.png)
+>
+
+- Проверил наличие скачанных образов командой `vagrant box list`
+
+>  Сохраненный официальный образ (Box) 64-битной ubuntu 20.04, который находиться в директории `$HOME/.vagrant.d`:
+>
+> ![screen_2_07.png](screen/screen_2_07.png)
+>
+
+---
+
+# Part 3.
+
+## Ручной запуск Docker Swarm
+
+- Т.к. **Docker Swarm** дольше запускает экземпляры контейнеров (из-за скачивания образов и их копирования на воркеры):
+    - Изменил `Dockerfile` сервисов, увеличив время ожидания скрипта `wait-for-it.sh` при запуске контейнеров (до 60 секунд для postgres и rabbitmq, до 90 секунд - для java-сервисов)
+    - Изменил в аргументах имена хостов (контейнеров) на идентичные именам сервисов, так как в `docker-compose.yml` для **Docker Swarm** отсутствует поле `container_name:`, и **Swarm** именует их самостоятельно
+
+-  В `docker-compose.yml` изменил имена хостов в поле `environment` идентичным именам сервисов.
+
+- Пересобрал образы командой `docker compose build`
+
+- Сгенерировал токен авторизации в **Docker Hub** и авторизовался на хосте, используя этот токен вместо пароля от лк
+
+>
+> ![screen_3_01.png](screen/screen_3_01.png)
+>
+
+- Используя команды `docker tag <id образа> <user docker hub>/<имя образа>:<version>`, присвоил каждому локальному образу новый тег с именем аккаунта **Docker Hub** и версией, подготовив их к отправке в удаленный репозиторий
+
+>
+> ![screen_3_02.png](screen/screen_3_02.png)
+>
+
+- Отправил образы в удаленный репозиторий командой ``docker push <user docker hub>/<имя образа>:<version>``
+
+>
+> ![screen_3_03.png](screen/screen_3_03.png)
+>
+> ![screen_3_04.png](screen/screen_3_04.png)
+>
+
+- Модифицировал `docker-compose.yml` под работу **Docker Swarm**:
+    - Изменил параметр `build:` на `image:`, указав путь до образов в удаленном репозитории
+    - В описании сервиса `posgres` добавил:
+```yaml
+    deploy:
+      placement:
+        constraints:
+          - node.role == manager # запуск только на ноде менеджера т.к. файл с инициализацией бд лежит только на этой вм (в избежании проблем с миграцией)
+```
+
+- Добавил драйвер `overlay` для того, чтобы контейнеры на разных воркерах могли общаться друг с другом напрямую по защищенной сети:
+
+```yaml
+networks:
+  backend:
+    driver: overlay
+```
+
+- Написал [скрипт для установки Docker](../Vagrant/scripts/install_docker.sh), на базе [официальной документации](https://docs.docker.com/engine/install/ubuntu/)
+
+- Модифицировал `Vagrantfile` для создания 3 машин:
+
+```ruby
+# -*- mode: ruby -*-
+# vi: set ft=ruby :
+
+Vagrant.configure("2") do |config|
+  config.vm.box = "ubuntu/focal64"
+
+  # manager01
+  config.vm.define "manager01" do |manager01|
+    manager01.vm.hostname = "manager01"
+    manager01.vm.network "private_network", ip: "192.168.10.100" # статический IP в приватной сети
+    
+    # копирование исходного кода приложения и конфигурации Swarm на manager01
+    manager01.vm.provision "file", source: "../src/docker-compose.yml", destination: "/home/vagrant/app/docker-compose.yml"
+    manager01.vm.provision "file", source: "../src/services", destination: "/home/vagrant/app/services"
+    # автоматическая установка Docker с помощью bash-скрипта
+    manager01.vm.provision "shell", path: "./scripts/install_docker.sh"
+
+    manager01.vm.provider "virtualbox" do |vb|
+      vb.name = "manager01_vm"
+      vb.memory = 2048
+      vb.cpus = 1
+    end
+  end
+
+  # worker01
+  config.vm.define "worker01" do |worker01|
+    worker01.vm.hostname = "worker01"
+    worker01.vm.network "private_network", ip: "192.168.10.101"
+    worker01.vm.provision "shell", path: "./scripts/install_docker.sh"
+
+    worker01.vm.provider "virtualbox" do |vb|
+      vb.name = "worker01_vm"
+      vb.memory = 2048
+      vb.cpus = 1
+    end
+  end
+
+  # worker02
+  config.vm.define "worker02" do |worker02|
+    worker02.vm.hostname = "worker02"
+    worker02.vm.network "private_network", ip: "192.168.10.102"
+    worker02.vm.provision "shell", path: "./scripts/install_docker.sh"
+
+    worker02.vm.provider "virtualbox" do |vb|
+      vb.name = "worker02_vm"
+      vb.memory = 2048
+      vb.cpus = 1
+    end
+  end
+end
+```
+
+>  Успешный запуск машин:
+>
+> ![screen_3_05.png](screen/screen_3_05.png)
+>
+
+- Подключился к `manager01` и актуализировал узел как менеджер командой `docker swarm init --advertise-addr [ip адрес машины для передачи в оверлейную сеть]`
+
+>
+> ![screen_3_06.png](screen/screen_3_06.png)
+>
+
+- Подключил `worker01` и `worker02` к менеджеру командой `docker swarm join --token [токен] [ip адрес менеджера]`
+
+>
+> ![screen_3_07.png](screen/screen_3_07.png)
+>
+> ![screen_3_08.png](screen/screen_3_08.png)
+>
+
+- Вернулся в `manager01` и проверил подключение узлов командой `docker node ls`
+
+> Список всех узлов в кластере:
+>
+> ![screen_3_10.png](screen/screen_3_10.png)
+>
+
+- На `manager01` запустил стек сервисов, описанных в конфигурационном файле `docker-compose.yml` командой `docker stack deploy -c docker-compose.yml <STACK_NAME>`
+
+>
+> ![screen_3_11.png](screen/screen_3_11.png)
+>
+
+> Успешный запуск стека
+>
+> ![screen_3_12.png](screen/screen_3_12.png)
+>
+> ![screen_3_13.png](screen/screen_3_13.png)
+>
+
+- Остановил и уничтожил машины командой `vagrant destroy -f`
+
+---
+
+## Автоматизация развертывания Docker Swarm + подключение nginx
+
+- Написал [скрипт](../Vagrant/scripts/init_swarm.sh) инициализации кластера **Swarm**, подключение узлов и [скрипт](../Vagrant/scripts/deploy_swarm.sh) деплоя стека
+
+- Написал конфиг файл [nginx](nginx/nginx.conf) и скопировал [wait-for-it.sh](nginx/wait-for-it.sh), который будет использоваться для проверки доступности [gateway-service](services/gateway-service), перед запуском **nginx**
+
+```nginx
+events { 
+    # макс количество одновременных соединений, которое может обрабатывать один рабочий процесс
+    worker_connections 1024; 
+}
+
+# блок конфигурации HTTP-сервера
+http {
+    # указываем Nginx использовать внутренний DNS-сервер Docker (127.0.0.11)
+    # заставляем Nginx обновлять IP-адреса сервисов каждые 10 секунд на случай, если Swarm перенесет контейнеры на другие ноды и изменит ip
+    resolver 127.0.0.11 valid=10s;
+
+    # конфиг виртуального хоста
+    server {
+        # слушать входящий HTTP-трафик на стандартном 80 порту внутри контейнера
+        listen 80;
+
+        # правило маршрутизации для всех запросов, начинающихся с /api/v1/
+        location /api/v1/ {
+            # проксирование запроса на сервис шлюза внутри сети Docker Swarm
+            # встроенный DNS в Docker, имя 'gateway-service' автоматически преобразуется в нужный IP-адрес
+            proxy_pass http://gateway-service:8087;
+
+            # передача оригинального заголовка хоста от клиента к бэкенду, для корректных редиректов
+            proxy_set_header Host $host;
+
+            # передаем реальный IP-адреса клиента бэкенду, иначе бэкенд будет видеть только IP-адрес Nginx
+            proxy_set_header X-Real-IP $remote_addr;
+        }
+
+        # перехватываем запросы авторизации к /api/v1/auth/
+        location /api/v1/auth/ {
+            # проксирование трафика аутентификации напрямую на изолированный сервис сессий
+            proxy_pass http://session-service:8081;
+
+            # сохранение заголовков хоста для корректной работы сессионного сервиса
+            proxy_set_header Host $host;
+
+            # передача реального IP-адреса пользователя для логирования и безопасности
+            proxy_set_header X-Real-IP $remote_addr;
+        }
+    }
+}
+
+```
+
+- Добавил в `docker-compose.yml` сервис `nginx`:
+
+```yaml
+  nginx:
+    image: nginx:1.25
+    ports:
+      - target: 80 # порт внутри контейнера
+        published: 80 # порт на машине manager01
+        protocol: tcp 
+        mode: host # пускаем трафик напрямую, что бы видеть реальный ip, а не балансировщика (10.0.0.2)
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/wait-for-it.sh:/usr/local/bin/wait-for-it.sh:ro # копируем скрипт wait-for-it.sh в контейнер 
+    # перед запуском nginx проверяем готовность gateway сервиса
+    entrypoint: ["/usr/local/bin/wait-for-it.sh", "-s", "--timeout=90", "gateway-service:8087", "--", "nginx", "-g", "daemon off;"]
+    networks:
+      - backend
+    deploy:
+      placement:
+        constraints:
+          - node.role == manager # запуск только на ноде менеджера, клиенты будут стучаться по ip менеджера
+```
+
+- Изменил `Vagrantfile`
+
+```ruby
+# -*- mode: ruby -*-
+# vi: set ft=ruby :
+
+Vagrant.configure("2") do |config|
+  config.vm.box = "ubuntu/focal64"
+  
+  # manager01
+  config.vm.define "manager01" do |manager01|
+    manager01.vm.hostname = "manager01"
+    manager01.vm.network "private_network", ip: "192.168.10.100"
+
+    # копируем конфигурационный файл nginx и скрипт wait-for-it.sh
+    manager01.vm.provision "file", source: "../src/nginx/nginx.conf", destination: "/home/vagrant/app/nginx/nginx.conf"
+    manager01.vm.provision "file", source: "../src/nginx/wait-for-it.sh", destination: "/home/vagrant/app/nginx/wait-for-it.sh"
+    
+    # выдаем права на исполнение wait-for-it.sh
+    manager01.vm.provision "shell", inline: "chmod +x /home/vagrant/app/nginx/wait-for-it.sh"
+
+    manager01.vm.provision "file", source: "../src/docker-compose.yml", destination: "/home/vagrant/app/docker-compose.yml"
+    manager01.vm.provision "file", source: "../src/services", destination: "/home/vagrant/app/services"
+
+    # установка Docker и инициализация ноды как swarm manager
+    manager01.vm.provision "shell", path: "./scripts/install_docker.sh"
+    manager01.vm.provision "shell", path: "./scripts/init_swarm.sh", args: "manager"
+
+    # запуск деплоя стека (запрещаем исполнять автоматически, запускаем в самом конце)
+    manager01.vm.provision "final_deploy", type: "shell", path: "./scripts/deploy_swarm.sh", run: "never"
+
+    manager01.vm.provider "virtualbox" do |vb|
+      vb.name = "manager01_vm"
+      vb.memory = 2048
+      vb.cpus = 1
+    end
+  end
+
+  config.vm.define "worker01" do |worker01|
+    worker01.vm.hostname = "worker01"
+    worker01.vm.network "private_network", ip: "192.168.10.101"
+
+    worker01.vm.provision "shell", path: "./scripts/install_docker.sh"
+    worker01.vm.provision "shell", path: "./scripts/init_swarm.sh", args: "worker"
+
+    worker01.vm.provider "virtualbox" do |vb|
+      vb.name = "worker01_vm"
+      vb.memory = 2048
+      vb.cpus = 1
+    end
+  end
+
+  config.vm.define "worker02" do |worker02|
+    worker02.vm.hostname = "worker02"
+    worker02.vm.network "private_network", ip: "192.168.10.102"
+
+    # установка Docker и инициализация ноды как swarm worker
+    worker02.vm.provision "shell", path: "./scripts/install_docker.sh"
+    worker02.vm.provision "shell", path: "./scripts/init_swarm.sh", args: "worker"
+
+    worker02.vm.provider "virtualbox" do |vb|
+      vb.name = "worker02_vm"
+      vb.memory = 2048
+      vb.cpus = 1
+    end
+  end
+
+  # запускаем в самом конце, после того как поднялись все машины
+  config.trigger.after :up do |trigger|
+    trigger.name = "Launch Docker Stack Deploy"
+    
+    # условие выполняется только в контексте последней машины worker02
+    trigger.only_on = "worker02"
+    
+    # принудительно запускаем на машине `manager01` скрытый ранее шаг `final_deploy` стартуем стек серисов
+    trigger.run = {
+      inline: "vagrant provision manager01 --provision-with final_deploy"
+    }
+  end
+end
+
+```
+
+- Запустил кластер командой `vagrant up`
+
+> Кластер запущен: стек сервисов и распределение контейнеров по узлам
+>
+> ![screen_3_14.png](screen/screen_3_14.png)
+>
+
+- Изменил переменные тестов в **Postman**, указав ip менеджера, где запущен **nginx** и его порт
+
+>
+> ![screen_3_15.png](screen/screen_3_15.png)
+>
+
+- Запустил тесты **Postman**
+
+> Успешно завершенные тесты:
+>
+> ![screen_3_16.png](screen/screen_3_16.png)
+>
+
+> Логи проксирования **nginx**:
+>
+> ![screen_3_17.png](screen/screen_3_17.png)
+>
+
+- Выключил ноды командой `vagrant halt`
+
+---
+
+## Установка отдельного стека Portainer
+
+- Написал файл [portainer-agent-stack.yml](portainer-agent-stack.yml)
+
+```yaml
+services:
+  agent: # агент portainer
+    image: portainer/agent:2.21.5 # официальный образ агента portainer версии 2.21.5
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock # предоставляем агенту доступ к Docker API сервера для управления контейнерами
+      - /var/lib/docker/volumes:/var/lib/docker/volumes # предоставляем доступ агенту к локальным volumes сервера для управления файлами
+    networks:
+      - agent_network # подключаем агента к изолированной сети для связи с portainer
+    deploy:
+      mode: global # автоматически запускаем ровно по одной копии агента на каждом сервере кластера
+      placement:
+        constraints: [node.platform.os == linux] # запускаем агентов только на серверах под управлением linux
+
+  portainer: # сам portainer
+    image: portainer/portainer-ce:2.21.5 # официальный образ бесплатной версии 2.21.5 (Portainer Community Edition)
+    # команда запуска (подробный разбор ниже)
+    command: -H tcp://tasks.agent:9001 --tlsskipverify
+    ports:
+      - "9443:9443" # пробрасываем веб-интерфейс portainer наружу на порт 9443
+    volumes:
+      - portainer_data:/data # сохраняем настройки portainer, учетные записи и данные внутри именованного volume
+    networks:
+      - agent_network # подключаем portainer к той же сети, где находятся агенты
+    deploy:
+      mode: replicated # режим фиксированного количества копий
+      replicas: 1 # запускаем строго одну копию portainer
+      placement:
+        constraints: [node.role == manager] # portainer должен работать строго на менеджер-ноде, иначе он не сможет управлять кластером
+
+networks:
+  agent_network:
+    driver: overlay # тип сети overlay - позволяем контейнерам общаться между разными нодами
+    attachable: true # разрешаем подключать к этой сети сторонние контейнеры, запущенные в другом стеке (наши java-сервисы)
+
+volumes:
+  portainer_data: # хранилище для базы данных portainer
+
+```
+
+<details>
+  <summary>Разбор команды -H tcp://tasks.agent:9001 --tlsskipverify </summary>
+
+*Эта команда указывает серверу Portainer, куда именно подключаться для управления кластером и как защищать это соединение.*
+
+------------------------------
+- 1. Флаг `-H (Host)`:
+     Говорит Portainer не управлять локальным Docker-окном напрямую. Мозг и команды управления находятся по следующему адресу:
+
+- 2. Адрес `tcp://tasks.agent:9001`:
+
+* tcp:// — протокол
+* :9001 — стандартный внутренний порт, на котором слушают агенты Portainer
+* tasks.agent — специальный DNS-запись типа Round-Robin, которую Docker Swarm создает автоматически
+
+*Как работает tasks.agent?*
+Если бы мы написали просто tcp://agent:9001, Docker Swarm направил бы Portainer только на один случайный агент через встроенный балансировщик (VIP)
+Префикс tasks. — это встроенная фича Docker Swarm. Запрос к tasks.agent возвращает Portainer список IP-адресов абсолютно всех агентов, запущенных на всех серверах кластера. Благодаря этому Portainer видит весь наш кластер целиком и может управлять контейнерами на любой ноде
+*Флаг --tlsskipverify*
+Этот флаг отключает строгую проверку SSL/TLS сертификатов при общении между Portainer и его агентами
+
+* Зачем он нужен: Агенты генерируют самоподписанные (self-signed) сертификаты безопасности прямо во время старта. Так как они не подписаны официальным мировым центром сертификации, Portainer по умолчанию заблокировал бы такое соединение из соображений безопасности
+* В данном случае это безопасно. Общение происходит внутри нашей закрытой оверлейной сети agent_network. Посторонний трафик туда попасть не может, поэтому проверку сертификатов мы смело пропускаем
+
+------------------------------
+
+</details>
+
+- Добавил в [Vagrantfile](../Vagrant/Vagrantfile):
+
+
+`manager01.vm.provision "file", source: "../src/portainer-agent-stack.yml", destination: "/home/vagrant/app/portainer-agent-stack.yml"` - копируем конфигурацию **portainer-стека** на `manager01`
+
+- Добавил в [скрипт](../Vagrant/scripts/deploy_swarm.sh):
+
+
+`docker stack deploy -c portainer-agent-stack.yml portainer` - запуск стека portainer описанного в [конфигурационном файле](portainer-agent-stack.yml)
+`docker stack ps portainer` - показываем запущенные таски
+`docker stack services portainer` - отображаем распределение контейнеров по узлам
+
+> Успешный запуск двух стеков:
+>
+> ![screen_3_18.png](screen/screen_3_18.png)
+>
+
+- Зашел в веб-интерфейс portainer по адресу `manager01` и порту `9443`
+
+> Успешное отображение интерфейса с предложением сброса пароля:
+>
+> ![screen_3_19.png](screen/screen_3_19.png)
+>
+
+> Вкладка `home` c карточкой Docker Swarm:
+>
+> ![screen_3_20.png](screen/screen_3_20.png)
+>
+
+> Перечень всех стеков: 2 swarm и 1 compose:
+>
+> ![screen_3_21.png](screen/screen_3_21.png)
+>
+
+> Визуализация распределения задач по узлам:
+>
+> ![screen_3_22.png](screen/screen_3_22.png)
+>
+> ![screen_3_23.png](screen/screen_3_23.png)
+>
