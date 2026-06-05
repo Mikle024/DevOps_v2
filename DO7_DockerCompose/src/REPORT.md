@@ -8,6 +8,7 @@
 * [Part 3.](#part-3)
   * [Ручной запуск Docker Swarm](#ручной-запуск-docker-swarm)
   * [Автоматизация развертывания Docker Swarm + подключение nginx](#автоматизация-развертывания-docker-swarm--подключение-nginx)
+  * [Установка отдельного стека Portainer](#установка-отдельного-стека-portainer)
 <!-- TOC -->
 
 # Part 1.
@@ -1015,3 +1016,116 @@ end
 - Выключил ноды командой `vagrant halt`
 
 ---
+
+## Установка отдельного стека Portainer
+
+- Написал файл [portainer-agent-stack.yml](portainer-agent-stack.yml)
+
+```yaml
+services:
+  agent: # агент portainer
+    image: portainer/agent:2.21.5 # официальный образ агента portainer версии 2.21.5
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock # предоставляем агенту доступ к Docker API сервера для управления контейнерами
+      - /var/lib/docker/volumes:/var/lib/docker/volumes # предоставляем доступ агенту к локальным volumes сервера для управления файлами
+    networks:
+      - agent_network # подключаем агента к изолированной сети для связи с portainer
+    deploy:
+      mode: global # автоматически запускаем ровно по одной копии агента на каждом сервере кластера
+      placement:
+        constraints: [node.platform.os == linux] # запускаем агентов только на серверах под управлением linux
+
+  portainer: # сам portainer
+    image: portainer/portainer-ce:2.21.5 # официальный образ бесплатной версии 2.21.5 (Portainer Community Edition)
+    # команда запуска (подробный разбор ниже)
+    command: -H tcp://tasks.agent:9001 --tlsskipverify
+    ports:
+      - "9443:9443" # пробрасываем веб-интерфейс portainer наружу на порт 9443
+    volumes:
+      - portainer_data:/data # сохраняем настройки portainer, учетные записи и данные внутри именованного volume
+    networks:
+      - agent_network # подключаем portainer к той же сети, где находятся агенты
+    deploy:
+      mode: replicated # режим фиксированного количества копий
+      replicas: 1 # запускаем строго одну копию portainer
+      placement:
+        constraints: [node.role == manager] # portainer должен работать строго на менеджер-ноде, иначе он не сможет управлять кластером
+
+networks:
+  agent_network:
+    driver: overlay # тип сети overlay - позволяем контейнерам общаться между разными нодами
+    attachable: true # разрешаем подключать к этой сети сторонние контейнеры, запущенные в другом стеке (наши java-сервисы)
+
+volumes:
+  portainer_data: # хранилище для базы данных portainer
+
+```
+
+<details>
+  <summary>Разбор команды -H tcp://tasks.agent:9001 --tlsskipverify </summary>
+
+*Эта команда указывает серверу Portainer, куда именно подключаться для управления кластером и как защищать это соединение.*
+
+------------------------------
+- 1. Флаг `-H (Host)`:
+     Говорит Portainer не управлять локальным Docker-окном напрямую. Мозг и команды управления находятся по следующему адресу:
+
+- 2. Адрес `tcp://tasks.agent:9001`:
+
+* tcp:// — протокол
+* :9001 — стандартный внутренний порт, на котором слушают агенты Portainer
+* tasks.agent — специальный DNS-запись типа Round-Robin, которую Docker Swarm создает автоматически
+
+*Как работает tasks.agent?*
+Если бы мы написали просто tcp://agent:9001, Docker Swarm направил бы Portainer только на один случайный агент через встроенный балансировщик (VIP)
+Префикс tasks. — это встроенная фича Docker Swarm. Запрос к tasks.agent возвращает Portainer список IP-адресов абсолютно всех агентов, запущенных на всех серверах кластера. Благодаря этому Portainer видит весь наш кластер целиком и может управлять контейнерами на любой ноде
+*Флаг --tlsskipverify*
+Этот флаг отключает строгую проверку SSL/TLS сертификатов при общении между Portainer и его агентами
+
+* Зачем он нужен: Агенты генерируют самоподписанные (self-signed) сертификаты безопасности прямо во время старта. Так как они не подписаны официальным мировым центром сертификации, Portainer по умолчанию заблокировал бы такое соединение из соображений безопасности
+* В данном случае это безопасно. Общение происходит внутри нашей закрытой оверлейной сети agent_network. Посторонний трафик туда попасть не может, поэтому проверку сертификатов мы смело пропускаем
+
+------------------------------
+
+</details>
+
+- Добавил в [Vagrantfile](../Vagrant/Vagrantfile):
+
+
+`manager01.vm.provision "file", source: "../src/portainer-agent-stack.yml", destination: "/home/vagrant/app/portainer-agent-stack.yml"` - копируем конфигурацию **portainer-стека** на `manager01`
+
+- Добавил в [скрипт](../Vagrant/scripts/deploy_swarm.sh):
+
+
+`docker stack deploy -c portainer-agent-stack.yml portainer` - запуск стека portainer описанного в [конфигурационном файле](portainer-agent-stack.yml)
+`docker stack ps portainer` - показываем запущенные таски
+`docker stack services portainer` - отображаем распределение контейнеров по узлам
+
+> Успешный запуск двух стеков:
+>
+> ![screen_3_18.png](screen/screen_3_18.png)
+>
+
+- Зашел в веб-интерфейс portainer по адресу `manager01` и порту `9443`
+
+> Успешное отображение интерфейса с предложением сброса пароля:
+>
+> ![screen_3_19.png](screen/screen_3_19.png)
+>
+
+> Вкладка `home` c карточкой Docker Swarm:
+>
+> ![screen_3_20.png](screen/screen_3_20.png)
+>
+
+> Перечень всех стеков: 2 swarm и 1 compose:
+>
+> ![screen_3_21.png](screen/screen_3_21.png)
+>
+
+> Визуализация распределения задач по узлам:
+>
+> ![screen_3_22.png](screen/screen_3_22.png)
+>
+> ![screen_3_23.png](screen/screen_3_23.png)
+>
