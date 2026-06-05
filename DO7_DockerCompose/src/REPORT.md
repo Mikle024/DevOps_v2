@@ -5,6 +5,8 @@
   * [Использование докер для запуска сервисов](#использование-докер-для-запуска-сервисов)
   * [Оптимизация образов и сборка с помощью docker compose](#оптимизация-образов-и-сборка-с-помощью-docker-compose)
 * [Part 2.](#part-2)
+* [Part 3.](#part-3)
+  * [Ручной запуск Docker Swarm](#ручной-запуск-docker-swarm)
 <!-- TOC -->
 
 # Part 1.
@@ -673,5 +675,155 @@ end
 >
 > ![screen_2_07.png](screen/screen_2_07.png)
 >
+
+---
+
+# Part 3.
+
+## Ручной запуск Docker Swarm
+
+- Т.к. **Docker Swarm** дольше запускает экземпляры контейнеров (из-за скачивания образов и их копирования на воркеры):
+    - Изменил `Dockerfile` сервисов, увеличив время ожидания скрипта `wait-for-it.sh` при запуске контейнеров (до 60 секунд для postgres и rabbitmq, до 90 секунд - для java-сервисов)
+    - Изменил в аргументах имена хостов (контейнеров) на идентичные именам сервисов, так как в `docker-compose.yml` для **Docker Swarm** отсутствует поле `container_name:`, и **Swarm** именует их самостоятельно
+
+-  В `docker-compose.yml` изменил имена хостов в поле `environment` идентичным именам сервисов.
+
+- Пересобрал образы командой `docker compose build`
+
+- Сгенерировал токен авторизации в **Docker Hub** и авторизовался на хосте, используя этот токен вместо пароля от лк
+
+>
+> ![screen_3_01.png](screen/screen_3_01.png)
+>
+
+- Используя команды `docker tag <id образа> <user docker hub>/<имя образа>:<version>`, присвоил каждому локальному образу новый тег с именем аккаунта **Docker Hub** и версией, подготовив их к отправке в удаленный репозиторий
+
+>
+> ![screen_3_02.png](screen/screen_3_02.png)
+>
+
+- Отправил образы в удаленный репозиторий командой ``docker push <user docker hub>/<имя образа>:<version>``
+
+>
+> ![screen_3_03.png](screen/screen_3_03.png)
+>
+> ![screen_3_04.png](screen/screen_3_04.png)
+>
+
+- Модифицировал `docker-compose.yml` под работу **Docker Swarm**:
+    - Изменил параметр `build:` на `image:`, указав путь до образов в удаленном репозитории
+    - В описании сервиса `posgres` добавил:
+```yaml
+    deploy:
+      placement:
+        constraints:
+          - node.role == manager # запуск только на ноде менеджера т.к. файл с инициализацией бд лежит только на этой вм (в избежании проблем с миграцией)
+```
+
+- Добавил драйвер `overlay` для того, чтобы контейнеры на разных воркерах могли общаться друг с другом напрямую по защищенной сети:
+
+```yaml
+networks:
+  backend:
+    driver: overlay
+```
+
+- Написал [скрипт для установки Docker](../Vagrant/scripts/install_docker.sh), на базе [официальной документации](https://docs.docker.com/engine/install/ubuntu/)
+
+- Модифицировал `Vagrantfile` для создания 3 машин:
+
+```ruby
+# -*- mode: ruby -*-
+# vi: set ft=ruby :
+
+Vagrant.configure("2") do |config|
+  config.vm.box = "ubuntu/focal64"
+
+  # manager01
+  config.vm.define "manager01" do |manager01|
+    manager01.vm.hostname = "manager01"
+    manager01.vm.network "private_network", ip: "192.168.10.100" # статический IP в приватной сети
+    
+    # копирование исходного кода приложения и конфигурации Swarm на manager01
+    manager01.vm.provision "file", source: "../src/docker-compose.yml", destination: "/home/vagrant/app/docker-compose.yml"
+    manager01.vm.provision "file", source: "../src/services", destination: "/home/vagrant/app/services"
+    # автоматическая установка Docker с помощью bash-скрипта
+    manager01.vm.provision "shell", path: "./scripts/install_docker.sh"
+
+    manager01.vm.provider "virtualbox" do |vb|
+      vb.name = "manager01_vm"
+      vb.memory = 2048
+      vb.cpus = 1
+    end
+  end
+
+  # worker01
+  config.vm.define "worker01" do |worker01|
+    worker01.vm.hostname = "worker01"
+    worker01.vm.network "private_network", ip: "192.168.10.101"
+    worker01.vm.provision "shell", path: "./scripts/install_docker.sh"
+
+    worker01.vm.provider "virtualbox" do |vb|
+      vb.name = "worker01_vm"
+      vb.memory = 2048
+      vb.cpus = 1
+    end
+  end
+
+  # worker02
+  config.vm.define "worker02" do |worker02|
+    worker02.vm.hostname = "worker02"
+    worker02.vm.network "private_network", ip: "192.168.10.102"
+    worker02.vm.provision "shell", path: "./scripts/install_docker.sh"
+
+    worker02.vm.provider "virtualbox" do |vb|
+      vb.name = "worker02_vm"
+      vb.memory = 2048
+      vb.cpus = 1
+    end
+  end
+end
+```
+
+>  Успешный запуск машин:
+>
+> ![screen_3_05.png](screen/screen_3_05.png)
+>
+
+- Подключился к `manager01` и актуализировал узел как менеджер командой `docker swarm init --advertise-addr [ip адрес машины для передачи в оверлейную сеть]`
+
+>
+> ![screen_3_06.png](screen/screen_3_06.png)
+>
+
+- Подключил `worker01` и `worker02` к менеджеру командой `docker swarm join --token [токен] [ip адрес менеджера]`
+
+>
+> ![screen_3_07.png](screen/screen_3_07.png)
+>
+> ![screen_3_08.png](screen/screen_3_08.png)
+>
+
+- Вернулся в `manager01` и проверил подключение узлов командой `docker node ls`
+
+> Список всех узлов в кластере:
+>
+> ![screen_3_10.png](screen/screen_3_10.png)
+>
+
+- На `manager01` запустил стек сервисов, описанных в конфигурационном файле `docker-compose.yml` командой `docker stack deploy -c docker-compose.yml <STACK_NAME>`
+
+>
+> ![screen_3_11.png](screen/screen_3_11.png)
+>
+
+> Успешный запуск стека
+>
+> ![screen_3_12.png](screen/screen_3_12.png)
+>
+> ![screen_3_13.png](screen/screen_3_13.png)
+>
+
+- Остановил и уничтожил машины командой `vagrant destroy -f`
 
 ---
