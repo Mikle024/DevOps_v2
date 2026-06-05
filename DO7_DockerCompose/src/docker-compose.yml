@@ -1,4 +1,21 @@
 services:
+  nginx:
+    image: nginx:1.25
+    ports:
+      - target: 80
+        published: 80
+        protocol: tcp
+        mode: host
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/wait-for-it.sh:/usr/local/bin/wait-for-it.sh:ro
+    entrypoint: ["/usr/local/bin/wait-for-it.sh", "-s", "--timeout=90", "gateway-service:8087", "--", "nginx", "-g", "daemon off;"]
+    networks:
+      - backend
+    deploy:
+      placement:
+        constraints:
+          - node.role == manager
   postgres:
     image: postgres:13
     environment:
