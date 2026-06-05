@@ -7,6 +7,7 @@
 * [Part 2.](#part-2)
 * [Part 3.](#part-3)
   * [Ручной запуск Docker Swarm](#ручной-запуск-docker-swarm)
+  * [Автоматизация развертывания Docker Swarm + подключение nginx](#автоматизация-развертывания-docker-swarm--подключение-nginx)
 <!-- TOC -->
 
 # Part 1.
@@ -825,5 +826,192 @@ end
 >
 
 - Остановил и уничтожил машины командой `vagrant destroy -f`
+
+---
+
+## Автоматизация развертывания Docker Swarm + подключение nginx
+
+- Написал [скрипт](../Vagrant/scripts/init_swarm.sh) инициализации кластера **Swarm**, подключение узлов и [скрипт](../Vagrant/scripts/deploy_swarm.sh) деплоя стека
+
+- Написал конфиг файл [nginx](nginx/nginx.conf) и скопировал [wait-for-it.sh](nginx/wait-for-it.sh), который будет использоваться для проверки доступности [gateway-service](services/gateway-service), перед запуском **nginx**
+
+```nginx
+events { 
+    # макс количество одновременных соединений, которое может обрабатывать один рабочий процесс
+    worker_connections 1024; 
+}
+
+# блок конфигурации HTTP-сервера
+http {
+    # указываем Nginx использовать внутренний DNS-сервер Docker (127.0.0.11)
+    # заставляем Nginx обновлять IP-адреса сервисов каждые 10 секунд на случай, если Swarm перенесет контейнеры на другие ноды и изменит ip
+    resolver 127.0.0.11 valid=10s;
+
+    # конфиг виртуального хоста
+    server {
+        # слушать входящий HTTP-трафик на стандартном 80 порту внутри контейнера
+        listen 80;
+
+        # правило маршрутизации для всех запросов, начинающихся с /api/v1/
+        location /api/v1/ {
+            # проксирование запроса на сервис шлюза внутри сети Docker Swarm
+            # встроенный DNS в Docker, имя 'gateway-service' автоматически преобразуется в нужный IP-адрес
+            proxy_pass http://gateway-service:8087;
+
+            # передача оригинального заголовка хоста от клиента к бэкенду, для корректных редиректов
+            proxy_set_header Host $host;
+
+            # передаем реальный IP-адреса клиента бэкенду, иначе бэкенд будет видеть только IP-адрес Nginx
+            proxy_set_header X-Real-IP $remote_addr;
+        }
+
+        # перехватываем запросы авторизации к /api/v1/auth/
+        location /api/v1/auth/ {
+            # проксирование трафика аутентификации напрямую на изолированный сервис сессий
+            proxy_pass http://session-service:8081;
+
+            # сохранение заголовков хоста для корректной работы сессионного сервиса
+            proxy_set_header Host $host;
+
+            # передача реального IP-адреса пользователя для логирования и безопасности
+            proxy_set_header X-Real-IP $remote_addr;
+        }
+    }
+}
+
+```
+
+- Добавил в `docker-compose.yml` сервис `nginx`:
+
+```yaml
+  nginx:
+    image: nginx:1.25
+    ports:
+      - target: 80 # порт внутри контейнера
+        published: 80 # порт на машине manager01
+        protocol: tcp 
+        mode: host # пускаем трафик напрямую, что бы видеть реальный ip, а не балансировщика (10.0.0.2)
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/wait-for-it.sh:/usr/local/bin/wait-for-it.sh:ro # копируем скрипт wait-for-it.sh в контейнер 
+    # перед запуском nginx проверяем готовность gateway сервиса
+    entrypoint: ["/usr/local/bin/wait-for-it.sh", "-s", "--timeout=90", "gateway-service:8087", "--", "nginx", "-g", "daemon off;"]
+    networks:
+      - backend
+    deploy:
+      placement:
+        constraints:
+          - node.role == manager # запуск только на ноде менеджера, клиенты будут стучаться по ip менеджера
+```
+
+- Изменил `Vagrantfile`
+
+```ruby
+# -*- mode: ruby -*-
+# vi: set ft=ruby :
+
+Vagrant.configure("2") do |config|
+  config.vm.box = "ubuntu/focal64"
+  
+  # manager01
+  config.vm.define "manager01" do |manager01|
+    manager01.vm.hostname = "manager01"
+    manager01.vm.network "private_network", ip: "192.168.10.100"
+
+    # копируем конфигурационный файл nginx и скрипт wait-for-it.sh
+    manager01.vm.provision "file", source: "../src/nginx/nginx.conf", destination: "/home/vagrant/app/nginx/nginx.conf"
+    manager01.vm.provision "file", source: "../src/nginx/wait-for-it.sh", destination: "/home/vagrant/app/nginx/wait-for-it.sh"
+    
+    # выдаем права на исполнение wait-for-it.sh
+    manager01.vm.provision "shell", inline: "chmod +x /home/vagrant/app/nginx/wait-for-it.sh"
+
+    manager01.vm.provision "file", source: "../src/docker-compose.yml", destination: "/home/vagrant/app/docker-compose.yml"
+    manager01.vm.provision "file", source: "../src/services", destination: "/home/vagrant/app/services"
+
+    # установка Docker и инициализация ноды как swarm manager
+    manager01.vm.provision "shell", path: "./scripts/install_docker.sh"
+    manager01.vm.provision "shell", path: "./scripts/init_swarm.sh", args: "manager"
+
+    # запуск деплоя стека (запрещаем исполнять автоматически, запускаем в самом конце)
+    manager01.vm.provision "final_deploy", type: "shell", path: "./scripts/deploy_swarm.sh", run: "never"
+
+    manager01.vm.provider "virtualbox" do |vb|
+      vb.name = "manager01_vm"
+      vb.memory = 2048
+      vb.cpus = 1
+    end
+  end
+
+  config.vm.define "worker01" do |worker01|
+    worker01.vm.hostname = "worker01"
+    worker01.vm.network "private_network", ip: "192.168.10.101"
+
+    worker01.vm.provision "shell", path: "./scripts/install_docker.sh"
+    worker01.vm.provision "shell", path: "./scripts/init_swarm.sh", args: "worker"
+
+    worker01.vm.provider "virtualbox" do |vb|
+      vb.name = "worker01_vm"
+      vb.memory = 2048
+      vb.cpus = 1
+    end
+  end
+
+  config.vm.define "worker02" do |worker02|
+    worker02.vm.hostname = "worker02"
+    worker02.vm.network "private_network", ip: "192.168.10.102"
+
+    # установка Docker и инициализация ноды как swarm worker
+    worker02.vm.provision "shell", path: "./scripts/install_docker.sh"
+    worker02.vm.provision "shell", path: "./scripts/init_swarm.sh", args: "worker"
+
+    worker02.vm.provider "virtualbox" do |vb|
+      vb.name = "worker02_vm"
+      vb.memory = 2048
+      vb.cpus = 1
+    end
+  end
+
+  # запускаем в самом конце, после того как поднялись все машины
+  config.trigger.after :up do |trigger|
+    trigger.name = "Launch Docker Stack Deploy"
+    
+    # условие выполняется только в контексте последней машины worker02
+    trigger.only_on = "worker02"
+    
+    # принудительно запускаем на машине `manager01` скрытый ранее шаг `final_deploy` стартуем стек серисов
+    trigger.run = {
+      inline: "vagrant provision manager01 --provision-with final_deploy"
+    }
+  end
+end
+
+```
+
+- Запустил кластер командой `vagrant up`
+
+> Кластер запущен: стек сервисов и распределение контейнеров по узлам
+>
+> ![screen_3_14.png](screen/screen_3_14.png)
+>
+
+- Изменил переменные тестов в **Postman**, указав ip менеджера, где запущен **nginx** и его порт
+
+>
+> ![screen_3_15.png](screen/screen_3_15.png)
+>
+
+- Запустил тесты **Postman**
+
+> Успешно завершенные тесты:
+>
+> ![screen_3_16.png](screen/screen_3_16.png)
+>
+
+> Логи проксирования **nginx**:
+>
+> ![screen_3_17.png](screen/screen_3_17.png)
+>
+
+- Выключил ноды командой `vagrant halt`
 
 ---
